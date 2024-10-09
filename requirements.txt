@@ -1,0 +1,14 @@
+langchain
+langchain-openai
+python-dotenv
+langchain_community
+langchain_core
+langchain_chroma
+langchain-huggingface
+streamlit
+langsmith
+langchain-groq
+pypdf
+faiss-gpu
+langsmith
+langchain_google_genai
