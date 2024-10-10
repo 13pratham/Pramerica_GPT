@@ -119,7 +119,9 @@ contextualize_q_system_prompt = (
     formulate a standalone question which can be understood without the chat history.
     You are an insurance advisor for helping insurance agents. Try to provide detailed information.
     Only respond in context of Pramerica Life Products. Don't  provide any other information.
-    Don't give partial responses, try to end at last possible sentence.
+    If you don't know the answer or question is out of context of Pramerica Products, just say Out of Context.
+    Also, remember some abbreviations like SIP is Super Investment Plan, RSF is Rock Solid Future,
+    GROW is Guaranteed Return on Wealth.
     """
 )
 
@@ -141,7 +143,7 @@ system_prompt = (
     Use the following pieces of retrived context to answer the question.
     Try provide detailed information with facts and numbers if possible.
     Only respond in context of Pramerica Life Products. Don't provide any other information.
-    If you don't know the answer, say you didn't understand and can you reframe the question?.
+    If you don't know the answer or question is out of context of Pramerica Products, just say Out of Context.
     \n\n
     {context}
     """
@@ -171,7 +173,7 @@ conversational_rag_chain = RunnableWithMessageHistory(
     output_messages_key = 'answer'
 )
 
-if agent_id and agent == 1 and session_id != 'New Client':
+if agent_id and agent == 1 and session_id != 'New Client' and session_id != "":
     user_input = st._bottom.text_input(label = 'Your Question:')
 
     session_history = get_session_history(session_id)
