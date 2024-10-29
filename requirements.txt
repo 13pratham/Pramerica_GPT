@@ -9,3 +9,4 @@ pymongo
 pandas
 faiss-cpu
 pypdf
+streamlit
