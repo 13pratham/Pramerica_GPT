@@ -34,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # environ
 import os
+import time
 import pymongo
 import datetime
 import pandas as pd
@@ -59,18 +60,19 @@ st.info("""This bot is trained on some products only:
         3. Super Investment Plan (SIP)
         4. Smart Wealth Plus (SW+)""")
 
-def preprocess(embedding_model, llm_model, temperature, tokens):
+def preprocess(embedding_model, llm_model, temperature, tokens, documents):
     
     embeddings = GoogleGenerativeAIEmbeddings(model = embedding_model)
     llm = ChatGoogleGenerativeAI(api_key = gemini_api_key, model = llm_model, temperature = temperature, max_tokens = tokens)
     vectors = FAISS.load_local(folder_path = "VectorDB/", embeddings=embeddings, index_name = "Google-" + embedding_model.split("-")[-1] + "_Embeddings", allow_dangerous_deserialization = True)
-    retriever = vectors.as_retriever(search_kwargs = {'k': 10})
+    retriever = vectors.as_retriever(search_kwargs = {'k': documents})
 
     contextualize_q_system_prompt = """
     Given a chat history and latest user question which might refer context in the chat history,
     formulate a standalone question which can be understood without the chat history.
-    You are an insurance advisor for helping insurance agents. Try to provide detailed information.
-    Only respond in context of Pramerica Life Products. Don't provide any other information.
+    You are a life insurance advisor for helping insurance agents.
+    Only use the context provided, and if you don't know the answer, response with:
+    "I am unsure, please provide more details or clarify your question."
     """
     
     contextualize_q_prompt = ChatPromptTemplate.from_messages(
@@ -82,10 +84,11 @@ def preprocess(embedding_model, llm_model, temperature, tokens):
     )
 
     system_prompt = """
-    You are an insurance advisor for helping insurance agents.
-    Use the following pieces of retrieved context to answer the question.
-    Try to provide detailed information with facts and numbers.
-    If you don't know the answer, say you didn't understand and can you reframe the question?.
+    You are an insurance advisor for helping life insurance agents to sell policies.
+    Only use the provided context to answer the questions.
+    TIf the context doesn't provide enough details, ask for clarification rathan than guessing.
+    If you don't have enough information, explicitly state:
+    "The Provided context doesn't have enough information.".
     \n\n
     {context}
     """
@@ -116,8 +119,9 @@ st.sidebar.write("Configure your Gen AI App")
 embedding_model = st.sidebar.selectbox(label = "Select an Embedding Model:", options = [i.name for i in genai.list_models() if "embedContent" in i.supported_generation_methods])
 llm_model = st.sidebar.selectbox(label = "Select a LLM Model:", options = [i.name.split("/")[1] for i in genai.list_models() if "generateContent" in i.supported_generation_methods])
 temperature = st.sidebar.slider(label = "Set Temperature:", min_value = 0.1, max_value = 2.0, step = 0.1, value = 0.4)
-tokens = st.sidebar.slider(label = "Set max tokens:", min_value = 128, max_value = 1024, step = 128, value = 512)
-rag_chain = preprocess(embedding_model, llm_model, temperature, tokens)
+tokens = st.sidebar.slider(label = "Set max tokens:", min_value = 256, max_value = 2048, step = 128, value = 1024)
+documents = st.sidebar.slider(label = "Set no of documents to be referred:", min_value = 5, max_value = 100, step = 5, value = 20)
+rag_chain = preprocess(embedding_model, llm_model, temperature, tokens, documents)
 
 session_id = "default"
 
@@ -144,10 +148,14 @@ if user_input:
     ques = "Pramerica Life Guaranteed Return on Wealth".join(ques.split("grow"))
     ques = "Premium Paying Term".join(ques.split("ppt"))
     ques = "Policy Term".join(ques.split("pt"))
+
+    begin = time.time()
     response = conversational_rag_chain.invoke(
         {'input': ques},
         config = {'configurable': {'session_id': session_id}},
     )
+    time.sleep(1)
+    end = time.time()
 
     for i in range(len(session_history.messages)):
         if i%2 == 0:
@@ -156,7 +164,8 @@ if user_input:
             
         else:
             message = st.chat_message('assistant')
-            message.write(f'Bot Message: {session_history.messages[i].content}')
+            message.write(f"Total time taken (in secs): {end - begin}")
+            message.write(f"Bot Message: {session_history.messages[i].content}")
             with st.expander('Documents Reffered'):
                 for i, doc in enumerate(response['context']):
                     st.write(i+1)
