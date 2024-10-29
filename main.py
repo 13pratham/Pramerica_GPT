@@ -3,6 +3,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import google.generativeai as genai
 # from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 
 # Text Splitter
@@ -12,7 +13,7 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 # from langchain_community.document_loaders import PyPDFDirectoryLoader
 
 # Vector DBs
-from langchain_community.vectorstores import FAISS  # Make sure this line is uncommented
+from langchain_community.vectorstores import FAISS
 
 # Message History & Prompt
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
@@ -36,27 +37,34 @@ import os
 import pymongo
 import datetime
 import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
 os.environ['GOOGLE_API_KEY'] = "AIzaSyAXy-vh0frJIgeSZ_aL_Z9ZK2bJWMzog5U"
 gemini_api_key = "AIzaSyAXy-vh0frJIgeSZ_aL_Z9ZK2bJWMzog5U"
+genai.configure(api_key = gemini_api_key)
 # nv_api_key = "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"
 # os.environ["NVIDIA_API_KEY"] = nv_api_key
 os.environ['LANGCHAIN_API_KEY'] = "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"
 os.environ['LANGCHAIN_TRACKING_V2'] = 'true'
 os.environ['LANGCHAIN_PROJECT'] = "Chatbot_Testing"
 
-# Global MongoDB client variable
-cnxn = None
+st.set_page_config(page_title = "Tarang AI", page_icon = ":rock:", layout = "wide")
+st.title("Tarang AI")
+st.write("This a Gen AI  chatbot to help agents get there queries resolved related to different products")
+st.info("""This bot is trained on some products only:
+        1. Rakshak Smart
+        2. Smart Income
+        3. Super Investment Plan (SIP)
+        4. Smart Wealth Plus (SW+)""")
 
-def preprocess():
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    # embeddings = NVIDIAEmbeddings(model="nvidia/nv-embedqa-e5-v5")
-    llm = ChatGoogleGenerativeAI(api_key=gemini_api_key, model='gemini-1.5-flash', temperature=0.4, max_tokens=500)
+def preprocess(embedding_model, llm_model, temperature, tokens):
     
-    vectors = FAISS.load_local(folder_path="VectorDB/", embeddings=embeddings, index_name="Google-001_Embeddings", allow_dangerous_deserialization=True)
-    retriever = vectors.as_retriever()
+    embeddings = GoogleGenerativeAIEmbeddings(model = embedding_model)
+    llm = ChatGoogleGenerativeAI(api_key = gemini_api_key, model = llm_model, temperature = temperature, max_tokens = tokens)
+    vectors = FAISS.load_local(folder_path = "VectorDB/", embeddings=embeddings, index_name = "Google-" + embedding_model.split("-")[-1] + "_Embeddings", allow_dangerous_deserialization = True)
+    retriever = vectors.as_retriever(search_kwargs = {'k': 10})
 
     contextualize_q_system_prompt = """
     Given a chat history and latest user question which might refer context in the chat history,
@@ -96,133 +104,62 @@ def preprocess():
     
     return rag_chain
 
-def get_message_history(Agent_ID, Session_ID):
-    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
-    return list(tbl.find({"agent_id": Agent_ID, "session_id": Session_ID}))
-
-def get_session_history(Session_ID) -> ChatMessageHistory:
-    messages = ChatMessageHistory()
-    Agent_ID, Session_ID = Session_ID.split('_')
-    message_history = get_message_history(Agent_ID, Session_ID)
-
-    for i in message_history:
-        messages.add_user_message(i['question'])
-        messages.add_ai_message(i['answer'])
+def get_session_history(session : str) -> BaseChatMessageHistory:
     
-    return messages
-
-def get_client_history(Agent_ID):
-    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
-    return [{"agent_id": i["agent_id"], "session_id": i["session_id"], "client_name": i["client_name"]} for i in tbl.find({"agent_id": Agent_ID})]
-
-def response(question, Agent_ID, Session_ID, Client_Name, rag_chain):
-    conversational_rag_chain = RunnableWithMessageHistory(
-        rag_chain,
-        get_session_history,
-        input_messages_key='input',
-        history_messages_key='chat_history',
-        output_messages_key='answer'
-    )
-
-    response = conversational_rag_chain.invoke(
-        {'input': question},
-        config={'configurable': {'session_id': Agent_ID + '_' + Session_ID}},
-    )
-
-    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
+    if session_id not in st.session_state.store:
+        st.session_state.store[session_id] = ChatMessageHistory()
     
-    data = {
-        "agent_id": Agent_ID,
-        "session_id": Session_ID,
-        "client_name": Client_Name,
-        "question": question,
-        "answer": response["answer"],
-        "datime": datetime.datetime.today()
-    }
+    return st.session_state.store[session_id]
 
-    tbl.insert_one(data)
-    return data
+st.sidebar.title("Tarang AI")
+st.sidebar.write("Configure your Gen AI App")
+embedding_model = st.sidebar.selectbox(label = "Select an Embedding Model:", options = [i.name for i in genai.list_models() if "embedContent" in i.supported_generation_methods])
+llm_model = st.sidebar.selectbox(label = "Select a LLM Model:", options = [i.name.split("/")[1] for i in genai.list_models() if "generateContent" in i.supported_generation_methods])
+temperature = st.sidebar.slider(label = "Set Temperature:", min_value = 0.1, max_value = 2.0, step = 0.1, value = 0.4)
+tokens = st.sidebar.slider(label = "Set max tokens:", min_value = 128, max_value = 1024, step = 128, value = 512)
+rag_chain = preprocess(embedding_model, llm_model, temperature, tokens)
 
-# API Setup
-rag_chain = preprocess()
+session_id = "default"
 
-# Initialize FastAPI app
-app = FastAPI(title="Langchain Server",
-              version="1.0",
-              description="A simple API server using Langchain runnable interfaces")
+if "store" not in st.session_state:
+    st.session_state.store = {}
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allowed origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all HTTP methods
-    allow_headers=["*"],  # Allows all headers
+conversational_rag_chain = RunnableWithMessageHistory(
+    rag_chain,
+    get_session_history,
+    input_messages_key = 'input',
+    history_messages_key = 'chat_history',
+    output_messages_key = 'answer'
 )
 
-# Connect to MongoDB at startup
-@app.on_event("startup")
-async def startup_event():
-    global cnxn
-    cnxn_string = "mongodb+srv://BusinessEnablerAdmin:MuiUJxhXkrGO8RTM@businessenabler-uat.ystpsmi.mongodb.net/"
-    cnxn = pymongo.MongoClient(cnxn_string)
+user_input = st._bottom.text_input("Enter your question:")
 
-# Close MongoDB connection when shutting down
-@app.on_event("shutdown")
-async def shutdown_event():
-    cnxn.close()
+if user_input:
 
-class Client(BaseModel):
-    agent_id: str
-    
-class Message(BaseModel):
-    agent_id: str
-    session_id: str
-    
-class QA(BaseModel):
-    agent_id: str
-    session_id: str
-    client_name: str
-    question: str
-
-@app.post("/response/")
-def QA_bot(Question: QA):
-
-    ques = Question.question.lower()
+    session_history = get_session_history(session_id)
+    ques = user_input.lower()
     ques = "Pramerica Life Super Investment Plan".join(ques.split("sip"))
     ques = "Pramerica Life RockSolid Future".join(ques.split("rsf"))
     ques = "Pramerica Life Smart Wealth Plus".join(ques.split("sw+"))
     ques = "Pramerica Life Guaranteed Return on Wealth".join(ques.split("grow"))
     ques = "Premium Paying Term".join(ques.split("ppt"))
     ques = "Policy Term".join(ques.split("pt"))
-
-    Response = response(
-        question=ques,
-        Agent_ID=Question.agent_id,
-        Session_ID=Question.session_id,
-        Client_Name=Question.client_name,
-        rag_chain=rag_chain
+    response = conversational_rag_chain.invoke(
+        {'input': ques},
+        config = {'configurable': {'session_id': session_id}},
     )
-    return {
-        "agent_id": Question.agent_id,
-        "session_id": Question.session_id,
-        "client_name": Question.client_name,
-        "question": Question.question,
-        "answer": Response['answer'],
-        "datime": Response['datime']
-    }
 
-@app.post("/message-history/")
-def message_history(ID: Message):
-    messages = get_message_history(Agent_ID=ID.agent_id, Session_ID=ID.session_id)
-    return [{"agent_id": i["agent_id"], "session_id": i["session_id"], "client_name": i["client_name"], "question": i["question"], "answer": i["answer"]} for i in messages]
-
-@app.post("/client-history/")
-def client_history(Agent_ID: Client):
-    df = pd.DataFrame(get_client_history(Agent_ID=Agent_ID.agent_id))
-    df = df.drop_duplicates()
-    clients = [{"agent_id": df.loc[i, "agent_id"], "session_id": df.loc[i, "session_id"], "client_name": df.loc[i, "client_name"]} for i in df.index]
-    return clients
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="localhost", port=8000)
+    for i in range(len(session_history.messages)):
+        if i%2 == 0:
+            message = st.chat_message('human')
+            message.write(f'Agent Message: {session_history.messages[i].content}')
+            
+        else:
+            message = st.chat_message('assistant')
+            message.write(f'Bot Message: {session_history.messages[i].content}')
+            with st.expander('Documents Reffered'):
+                for i, doc in enumerate(response['context']):
+                    st.write(i+1)
+                    st.write("Product Brochure: ", doc.metadata)
+                    st.write("Content: ", doc.page_content)
+                    st.write('-----------------------------------')

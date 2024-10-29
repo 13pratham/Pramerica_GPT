@@ -1,137 +1,228 @@
-## RAG Q&A Conversation With PDF Including Chat History
-import streamlit as st
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_chroma import Chroma
+# Models
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Embeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
+
+# Text Splitter
+# from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# PDF Loader
+# from langchain_community.document_loaders import PyPDFDirectoryLoader
+
+# Vector DBs
+from langchain_community.vectorstores import FAISS  # Make sure this line is uncommented
+
+# Message History & Prompt
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_groq import ChatGroq
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-import os
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+# Chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+
+# API
+import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+
+# environ
+import os
+import pymongo
+import datetime
+import pandas as pd
 from dotenv import load_dotenv
 load_dotenv()
 
-os.environ['HF_TOKEN']=os.getenv("HF_TOKEN")
-embeddings=HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+os.environ['GOOGLE_API_KEY'] = "AIzaSyAXy-vh0frJIgeSZ_aL_Z9ZK2bJWMzog5U"
+gemini_api_key = "AIzaSyAXy-vh0frJIgeSZ_aL_Z9ZK2bJWMzog5U"
+# nv_api_key = "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"
+# os.environ["NVIDIA_API_KEY"] = nv_api_key
+os.environ['LANGCHAIN_API_KEY'] = "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"
+os.environ['LANGCHAIN_TRACKING_V2'] = 'true'
+os.environ['LANGCHAIN_PROJECT'] = "Chatbot_Testing"
 
+# Global MongoDB client variable
+cnxn = None
 
-## set up Streamlit 
-st.title("Conversational RAG With PDF uplaods and chat history")
-st.write("Upload Pdf's and chat with their content")
+def preprocess():
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    # embeddings = NVIDIAEmbeddings(model="nvidia/nv-embedqa-e5-v5")
+    llm = ChatGoogleGenerativeAI(api_key=gemini_api_key, model='gemini-1.5-flash', temperature=0.4, max_tokens=500)
+    
+    vectors = FAISS.load_local(folder_path="VectorDB/", embeddings=embeddings, index_name="Google-001_Embeddings", allow_dangerous_deserialization=True)
+    retriever = vectors.as_retriever()
 
-## Input the Groq API Key
-api_key=st.text_input("Enter your Groq API key:",type="password")
+    contextualize_q_system_prompt = """
+    Given a chat history and latest user question which might refer context in the chat history,
+    formulate a standalone question which can be understood without the chat history.
+    You are an insurance advisor for helping insurance agents. Try to provide detailed information.
+    Only respond in context of Pramerica Life Products. Don't provide any other information.
+    """
+    
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
 
-## Check if groq api key is provided
-if api_key:
-    llm=ChatGroq(groq_api_key=api_key,model_name="Gemma2-9b-It")
+    system_prompt = """
+    You are an insurance advisor for helping insurance agents.
+    Use the following pieces of retrieved context to answer the question.
+    Try to provide detailed information with facts and numbers.
+    If you don't know the answer, say you didn't understand and can you reframe the question?.
+    \n\n
+    {context}
+    """
+    
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ('system', system_prompt),
+            MessagesPlaceholder('chat_history'),
+            ('human', '{input}'),
+        ]
+    )
 
-    ## chat interface
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    
+    return rag_chain
 
-    session_id=st.text_input("Session ID",value="default_session")
-    ## statefully manage chat history
+def get_message_history(Agent_ID, Session_ID):
+    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
+    return list(tbl.find({"agent_id": Agent_ID, "session_id": Session_ID}))
 
-    if 'store' not in st.session_state:
-        st.session_state.store={}
+def get_session_history(Session_ID) -> ChatMessageHistory:
+    messages = ChatMessageHistory()
+    Agent_ID, Session_ID = Session_ID.split('_')
+    message_history = get_message_history(Agent_ID, Session_ID)
 
-    uploaded_files=st.file_uploader("Choose A PDf file",type="pdf",accept_multiple_files=True)
-    ## Process uploaded  PDF's
-    if uploaded_files:
-        documents=[]
-        for uploaded_file in uploaded_files:
-            temppdf=f"./temp.pdf"
-            with open(temppdf,"wb") as file:
-                file.write(uploaded_file.getvalue())
-                file_name=uploaded_file.name
+    for i in message_history:
+        messages.add_user_message(i['question'])
+        messages.add_ai_message(i['answer'])
+    
+    return messages
 
-            loader=PyPDFLoader(temppdf)
-            docs=loader.load()
-            documents.extend(docs)
+def get_client_history(Agent_ID):
+    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
+    return [{"agent_id": i["agent_id"], "session_id": i["session_id"], "client_name": i["client_name"]} for i in tbl.find({"agent_id": Agent_ID})]
 
-    # Split and create embeddings for the documents
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-        splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-        retriever = vectorstore.as_retriever()    
+def response(question, Agent_ID, Session_ID, Client_Name, rag_chain):
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
+        input_messages_key='input',
+        history_messages_key='chat_history',
+        output_messages_key='answer'
+    )
 
-        contextualize_q_system_prompt=(
-            "Given a chat history and the latest user question"
-            "which might reference context in the chat history, "
-            "formulate a standalone question which can be understood "
-            "without the chat history. Do NOT answer the question, "
-            "just reformulate it if needed and otherwise return it as is."
-        )
-        contextualize_q_prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", contextualize_q_system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-        
-        history_aware_retriever=create_history_aware_retriever(llm,retriever,contextualize_q_prompt)
+    response = conversational_rag_chain.invoke(
+        {'input': question},
+        config={'configurable': {'session_id': Agent_ID + '_' + Session_ID}},
+    )
 
-        ## Answer question
+    tbl = cnxn["BusinessEnablerAdmin"]["message_history"]
+    
+    data = {
+        "agent_id": Agent_ID,
+        "session_id": Session_ID,
+        "client_name": Client_Name,
+        "question": question,
+        "answer": response["answer"],
+        "datime": datetime.datetime.today()
+    }
 
-        # Answer question
-        system_prompt = (
-                "You are an assistant for question-answering tasks. "
-                "Use the following pieces of retrieved context to answer "
-                "the question. If you don't know the answer, say that you "
-                "don't know. Use three sentences maximum and keep the "
-                "answer concise."
-                "\n\n"
-                "{context}"
-            )
-        qa_prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}"),
-                ]
-            )
-        
-        question_answer_chain=create_stuff_documents_chain(llm,qa_prompt)
-        rag_chain=create_retrieval_chain(history_aware_retriever,question_answer_chain)
+    tbl.insert_one(data)
+    return data
 
-        def get_session_history(session:str)->BaseChatMessageHistory:
-            if session_id not in st.session_state.store:
-                st.session_state.store[session_id]=ChatMessageHistory()
-            return st.session_state.store[session_id]
-        
-        conversational_rag_chain=RunnableWithMessageHistory(
-            rag_chain,get_session_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
-            output_messages_key="answer"
-        )
+# API Setup
+rag_chain = preprocess()
 
-        user_input = st.text_input("Your question:")
-        if user_input:
-            session_history=get_session_history(session_id)
-            response = conversational_rag_chain.invoke(
-                {"input": user_input},
-                config={
-                    "configurable": {"session_id":session_id}
-                },  # constructs a key "abc123" in `store`.
-            )
-            st.write(st.session_state.store)
-            st.write("Assistant:", response['answer'])
-            st.write("Chat History:", session_history.messages)
-else:
-    st.warning("Please enter the GRoq API Key")
+# Initialize FastAPI app
+app = FastAPI(title="Langchain Server",
+              version="1.0",
+              description="A simple API server using Langchain runnable interfaces")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all HTTP methods
+    allow_headers=["*"],  # Allows all headers
+)
 
+# Connect to MongoDB at startup
+@app.on_event("startup")
+async def startup_event():
+    global cnxn
+    cnxn_string = "mongodb+srv://BusinessEnablerAdmin:MuiUJxhXkrGO8RTM@businessenabler-uat.ystpsmi.mongodb.net/"
+    cnxn = pymongo.MongoClient(cnxn_string)
 
+# Close MongoDB connection when shutting down
+@app.on_event("shutdown")
+async def shutdown_event():
+    cnxn.close()
 
+class Client(BaseModel):
+    agent_id: str
+    
+class Message(BaseModel):
+    agent_id: str
+    session_id: str
+    
+class QA(BaseModel):
+    agent_id: str
+    session_id: str
+    client_name: str
+    question: str
 
+@app.post("/response/")
+def QA_bot(Question: QA):
 
+    ques = Question.question.lower()
+    ques = "Pramerica Life Super Investment Plan".join(ques.split("sip"))
+    ques = "Pramerica Life RockSolid Future".join(ques.split("rsf"))
+    ques = "Pramerica Life Smart Wealth Plus".join(ques.split("sw+"))
+    ques = "Pramerica Life Guaranteed Return on Wealth".join(ques.split("grow"))
+    ques = "Premium Paying Term".join(ques.split("ppt"))
+    ques = "Policy Term".join(ques.split("pt"))
 
+    Response = response(
+        question=ques,
+        Agent_ID=Question.agent_id,
+        Session_ID=Question.session_id,
+        Client_Name=Question.client_name,
+        rag_chain=rag_chain
+    )
+    return {
+        "agent_id": Question.agent_id,
+        "session_id": Question.session_id,
+        "client_name": Question.client_name,
+        "question": Question.question,
+        "answer": Response['answer'],
+        "datime": Response['datime']
+    }
 
+@app.post("/message-history/")
+def message_history(ID: Message):
+    messages = get_message_history(Agent_ID=ID.agent_id, Session_ID=ID.session_id)
+    return [{"agent_id": i["agent_id"], "session_id": i["session_id"], "client_name": i["client_name"], "question": i["question"], "answer": i["answer"]} for i in messages]
 
+@app.post("/client-history/")
+def client_history(Agent_ID: Client):
+    df = pd.DataFrame(get_client_history(Agent_ID=Agent_ID.agent_id))
+    df = df.drop_duplicates()
+    clients = [{"agent_id": df.loc[i, "agent_id"], "session_id": df.loc[i, "session_id"], "client_name": df.loc[i, "client_name"]} for i in df.index]
+    return clients
 
+if __name__ == "__main__":
+    uvicorn.run(app, host="localhost", port=8000)
